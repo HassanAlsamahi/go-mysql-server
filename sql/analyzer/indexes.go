@@ -27,9 +27,10 @@ var errInvalidInRightEvaluation = errors.NewKind("expecting evaluation of IN exp
 // indexLookup contains an sql.IndexLookup and all sql.Index that are involved
 // in it.
 type indexLookup struct {
-	exprs   []sql.Expression
+	fields  []sql.Expression
 	lookup  sql.IndexLookup
 	indexes []sql.Index
+	expr    sql.Expression
 }
 
 type indexLookupsByTable map[string]*indexLookup
@@ -140,6 +141,7 @@ func getIndexes(
 						return nil, err
 					}
 					leftIdx.lookup = newLookup
+					leftIdx.expr = expression.NewOr(leftIdx.expr, rightIdx.expr)
 					leftIdx.indexes = append(leftIdx.indexes, rightIdx.indexes...)
 					result[table] = leftIdx
 					foundRightIdx = true
@@ -204,9 +206,10 @@ func getIndexes(
 				}
 
 				result[getField.Table()] = &indexLookup{
-					exprs:   []sql.Expression{e},
+					fields:  []sql.Expression{e},
 					indexes: []sql.Index{idx},
 					lookup:  lookup,
+					expr:    e,
 				}
 			}
 		}
@@ -271,9 +274,10 @@ func getIndexes(
 				}
 
 				result[getField.Table()] = &indexLookup{
-					exprs:   []sql.Expression{getField},
+					fields:  []sql.Expression{getField},
 					indexes: []sql.Index{idx},
 					lookup:  lookup,
+					expr:    e,
 				}
 			}
 		}
@@ -364,9 +368,10 @@ func getComparisonIndexLookup(
 			}
 
 			return &indexLookup{
-				exprs:   []sql.Expression{left},
+				fields:  []sql.Expression{left},
 				lookup:  lookup,
 				indexes: []sql.Index{idx},
+				expr:    e,
 			}, nil
 		}
 	}
@@ -443,7 +448,7 @@ func getNegatedIndexes(
 
 		result := indexLookupsByTable{
 			getField.Table(): {
-				exprs:   []sql.Expression{left},
+				fields:  []sql.Expression{left},
 				indexes: []sql.Index{idx},
 				lookup:  lookup,
 			},
@@ -490,7 +495,7 @@ func getNegatedIndexes(
 
 				return indexLookupsByTable{
 					getField.Table(): {
-						exprs:   []sql.Expression{cmp.Left()},
+						fields:  []sql.Expression{cmp.Left()},
 						indexes: []sql.Index{idx},
 						lookup:  lookup,
 					},
@@ -560,6 +565,7 @@ func indexesIntersection(ctx *sql.Context, left, right indexLookupsByTable) (ind
 				return nil, err
 			}
 			idx.indexes = append(idx.indexes, idx2.indexes...)
+			idx.expr = expression.NewAnd(idx.expr, idx2.expr)
 		}
 
 		result[table] = idx
@@ -669,8 +675,9 @@ func getMultiColumnIndexForExpressions(
 	indexBuilder := sql.NewIndexBuilder(ctx, index)
 
 	var expressions []sql.Expression
+	var matchedExprs joinColExprs
 	for _, selectedExpr := range normalizedExpressions {
-		matchedExprs := findColumns(exprs, selectedExpr.String())
+		matchedExprs = findColumns(exprs, selectedExpr.String())
 
 		for _, expr := range matchedExprs {
 			switch expr.comparison.(type) {
@@ -760,10 +767,19 @@ func getMultiColumnIndexForExpressions(
 	if lookup == nil {
 		return nil, nil
 	}
+	var lookupExpr sql.Expression
+	for _, m := range matchedExprs {
+		if lookupExpr == nil {
+			lookupExpr = m.comparison
+		} else {
+			lookupExpr = expression.NewAnd(lookupExpr, m.comparison)
+		}
+	}
 	return &indexLookup{
-		exprs:   expressions,
+		fields:  expressions,
 		lookup:  lookup,
 		indexes: []sql.Index{index},
+		expr:    lookupExpr,
 	}, nil
 }
 
